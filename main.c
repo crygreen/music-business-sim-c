@@ -136,6 +136,280 @@ struct TrackReport analyze_track(struct Track *track)
     return report;
 }
 
+int artist_royalty_for_week(double weekly_revenue_usd, int artist_share_percent);
+int weeks_to_recoup(int remaining_usd, int weekly_royalties_usd);
+double expected_revenue_from_report(
+    int low_revenue_usd,
+    double base_revenue_usd,
+    int high_revenue_usd,
+    int low_probability_percent,
+    int base_probability_percent,
+    int high_probability_percent
+);
+double expected_weeks_from_report(
+    int low_weeks,
+    int base_weeks,
+    int high_weeks,
+    int low_probability_percent,
+    int base_probability_percent,
+    int high_probability_percent
+);
+
+void print_revenue_scenarios(struct Track *track, int remaining_usd,
+                             int artist_share_percent,
+                             int low_probability_percent,
+                             int base_probability_percent,
+                             int high_probability_percent)
+{
+    int smallest_change =
+        track->weeks[1].revenue_usd - track->weeks[0].revenue_usd;
+    int largest_change = smallest_change;
+
+    for (int week = 2; week < WEEKS_PER_TRACK; week++) {
+        int weekly_change =
+            track->weeks[week].revenue_usd -
+            track->weeks[week - 1].revenue_usd;
+
+        if (weekly_change < smallest_change) {
+            smallest_change = weekly_change;
+        }
+        if (weekly_change > largest_change) {
+            largest_change = weekly_change;
+        }
+    }
+
+    int last_week_revenue = track->weeks[WEEKS_PER_TRACK - 1].revenue_usd;
+    int low_scenario = last_week_revenue + smallest_change;
+    int high_scenario = last_week_revenue + largest_change;
+
+    if (low_scenario < 0) {
+        low_scenario = 0;
+    }
+    if (high_scenario < 0) {
+        high_scenario = 0;
+    }
+
+    struct TrackReport report = analyze_track(track);
+    printf("Сценарии дохода на следующую неделю: слабый $%d, базовый $%.1f, сильный $%d\n",
+           low_scenario,
+           report.next_week_revenue_forecast,
+           high_scenario);
+
+    int low_royalties =
+        artist_royalty_for_week(low_scenario, artist_share_percent);
+    int base_royalties =
+        artist_royalty_for_week(report.next_week_revenue_forecast,
+                                artist_share_percent);
+    int high_royalties =
+        artist_royalty_for_week(high_scenario, artist_share_percent);
+
+    int low_weeks = weeks_to_recoup(remaining_usd, low_royalties);
+    int base_weeks = weeks_to_recoup(remaining_usd, base_royalties);
+    int high_weeks = weeks_to_recoup(remaining_usd, high_royalties);
+
+    if (low_weeks < 0 || base_weeks < 0 || high_weeks < 0) {
+        printf("В одном из сценариев отчисления не позволяют оценить срок возврата.\n");
+    } else {
+        printf("Срок возврата по сценариям: слабый %d недель, базовый %d, сильный %d\n",
+               low_weeks, base_weeks, high_weeks);
+    }
+
+    double expected_revenue_usd = expected_revenue_from_report(
+        low_scenario,
+        report.next_week_revenue_forecast,
+        high_scenario,
+        low_probability_percent,
+        base_probability_percent,
+        high_probability_percent
+    );
+
+    double expected_scenario_weeks = expected_weeks_from_report(
+        low_weeks,
+        base_weeks,
+        high_weeks,
+        low_probability_percent,
+        base_probability_percent,
+        high_probability_percent
+    );
+
+    int expected_royalties_usd =
+        artist_royalty_for_week(expected_revenue_usd, artist_share_percent);
+    int expected_weeks_to_recoup =
+        weeks_to_recoup(remaining_usd, expected_royalties_usd);
+
+    printf("Отчёт менеджера: вероятности слабого/базового/сильного исхода %d%%/%d%%/%d%%\n",
+           low_probability_percent,
+           base_probability_percent,
+           high_probability_percent);
+    printf("Ожидаемый доход по отчёту: $%.1f, возврат примерно за %d недель\n",
+           expected_revenue_usd, expected_weeks_to_recoup);
+    if (expected_scenario_weeks >= 0.0) {
+        printf("Средний срок по вероятностям сценариев: %.1f недель\n",
+               expected_scenario_weeks);
+    } else {
+        printf("Средний срок по сценариям оценить нельзя: один из сценариев не окупается.\n");
+    }
+}
+
+struct RoyaltySettlement {
+    int payout_usd;
+    int remaining_usd;
+};
+
+struct RoyaltySettlement settle_royalties(int royalties_usd, int remaining_usd)
+{
+    int recouped_usd = royalties_usd;
+    if (recouped_usd > remaining_usd) {
+        recouped_usd = remaining_usd;
+    }
+
+    struct RoyaltySettlement result = {
+        royalties_usd - recouped_usd,
+        remaining_usd - recouped_usd
+    };
+    return result;
+}
+
+int artist_royalty_for_week(double weekly_revenue_usd, int artist_share_percent)
+{
+    return (int)(weekly_revenue_usd * artist_share_percent / 100.0);
+}
+
+int initial_recoupable_balance(
+    int advance_usd,
+    int recording_cost_usd,
+    bool recording_is_recoupable,
+    int marketing_cost_usd,
+    bool marketing_is_recoupable
+)
+{
+    int balance = advance_usd;
+
+    if (recording_is_recoupable) {
+        balance += recording_cost_usd;
+    }
+
+    if (marketing_is_recoupable) {
+        balance += marketing_cost_usd;
+    }
+
+    return balance;
+}
+
+int revenue_needed_to_recoup(int remaining_usd, int artist_share_percent)
+{
+    if (artist_share_percent <= 0) {
+        return -1;
+    }
+
+    return (remaining_usd * 100 + artist_share_percent - 1) /
+           artist_share_percent;
+}
+
+int weeks_to_recoup(int remaining_usd, int weekly_royalties_usd)
+{
+    if (remaining_usd <= 0) {
+        return 0;
+    }
+    if (weekly_royalties_usd <= 0) {
+        return -1;
+    }
+
+    return (remaining_usd + weekly_royalties_usd - 1) /
+           weekly_royalties_usd;
+}
+
+double expected_revenue_from_report(
+    int low_revenue_usd,
+    double base_revenue_usd,
+    int high_revenue_usd,
+    int low_probability_percent,
+    int base_probability_percent,
+    int high_probability_percent
+)
+{
+    int probability_total =
+        low_probability_percent +
+        base_probability_percent +
+        high_probability_percent;
+
+    if (low_probability_percent < 0 ||
+        base_probability_percent < 0 ||
+        high_probability_percent < 0 ||
+        probability_total != 100) {
+        return -1.0;
+    }
+
+    return low_revenue_usd * low_probability_percent / 100.0 +
+           base_revenue_usd * base_probability_percent / 100.0 +
+           high_revenue_usd * high_probability_percent / 100.0;
+}
+
+double expected_weeks_from_report(
+    int low_weeks,
+    int base_weeks,
+    int high_weeks,
+    int low_probability_percent,
+    int base_probability_percent,
+    int high_probability_percent
+)
+{
+    if ((low_probability_percent > 0 && low_weeks < 0) ||
+        (base_probability_percent > 0 && base_weeks < 0) ||
+        (high_probability_percent > 0 && high_weeks < 0)) {
+        return -1.0;
+    }
+
+    return low_weeks * (low_probability_percent / 100.0) +
+           base_weeks * (base_probability_percent / 100.0) +
+           high_weeks * (high_probability_percent / 100.0);
+}
+
+void preview_contract(struct Track *track,
+                      int low_probability_percent,
+                      int base_probability_percent,
+                      int high_probability_percent)
+{
+    const int artist_share_percent = 40;
+    const int advance_usd = 500;
+    struct TrackReport report = analyze_track(track);
+
+    int remaining_usd = initial_recoupable_balance(
+        advance_usd,
+        track->recording_cost_usd,
+        true,
+        report.total_ad_spend_usd,
+        true
+    );
+
+    printf("\nПример контракта для трека «%s»\n", track->title);
+    printf("Доля артиста: %d%%, начальный остаток: $%d\n",
+           artist_share_percent, remaining_usd);
+    printf("Доход для полного возмещения: $%d\n",
+           revenue_needed_to_recoup(remaining_usd, artist_share_percent));
+    print_revenue_scenarios(track, remaining_usd, artist_share_percent,
+                            low_probability_percent,
+                            base_probability_percent,
+                            high_probability_percent);
+
+    for (int week = 0; week < WEEKS_PER_TRACK; week++) {
+        int royalties_usd = artist_royalty_for_week(
+            track->weeks[week].revenue_usd,
+            artist_share_percent
+        );
+        struct RoyaltySettlement settlement =
+            settle_royalties(royalties_usd, remaining_usd);
+
+        printf("Неделя %d: отчисления $%d, выплата артисту $%d, остаток $%d\n",
+               week + 1,
+               royalties_usd,
+               settlement.payout_usd,
+               settlement.remaining_usd);
+
+        remaining_usd = settlement.remaining_usd;
+    }
+}
+
 void print_album_report(struct Album *album)
 {
     printf("\nКаталог: %s\n", album->title);
@@ -207,6 +481,31 @@ int main(void)
     };
 
     print_album_report(&album);
+
+    int low_probability_percent;
+    int base_probability_percent;
+    int high_probability_percent;
+
+    printf("\nОценка менеджера. Введите вероятности слабого, базового и сильного сценариев (в сумме 100): ");
+    if (scanf("%d %d %d", &low_probability_percent,
+              &base_probability_percent, &high_probability_percent) != 3) {
+        printf("Ошибка: введите три целых числа.\n");
+        return 1;
+    }
+
+    if (low_probability_percent < 0 ||
+        base_probability_percent < 0 ||
+        high_probability_percent < 0 ||
+        low_probability_percent + base_probability_percent +
+            high_probability_percent != 100) {
+        printf("Ошибка: вероятности должны быть неотрицательными и в сумме давать 100.\n");
+        return 1;
+    }
+
+    preview_contract(&album.tracks[1],
+                     low_probability_percent,
+                     base_probability_percent,
+                     high_probability_percent);
 
     int manager_loyalty;
 
